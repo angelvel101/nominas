@@ -7,7 +7,7 @@
 import streamlit as st
 import pandas as pd
 
-st.title("Consolidador de Nóminas (Modo Avanzado)")
+st.title("Consolidador de Nóminas (Modo Aspiradora)")
 
 archivos_subidos = st.file_uploader("Sube todas las nóminas aquí (Excel)", type=["xlsx"], accept_multiple_files=True)
 
@@ -15,51 +15,56 @@ if archivos_subidos:
     lista_df = []
     
     for archivo in archivos_subidos:
-        # Leemos el archivo como una cuadrícula cruda (sin encabezados)
-        # sheet_name=0 le dice que solo lea la primera hoja para evitar duplicar
-        df = pd.read_excel(archivo, sheet_name=0, header=None)
+        # sheet_name=None lee TODAS las hojas y devuelve un diccionario {Nombre_Hoja: Datos}
+        diccionario_hojas = pd.read_excel(archivo, sheet_name=None, header=None)
         
-        pat_col, mat_col, nom_col, imp_col = None, None, None, None
+        datos_de_este_archivo = []
         
-        # 1. Escanear qué columna es cuál buscando palabras clave en toda la columna
-        for col in df.columns:
-            col_str = df[col].astype(str).str.lower()
-            if col_str.str.contains('paterno', na=False).any(): pat_col = col
-            if col_str.str.contains('materno', na=False).any(): mat_col = col
-            if col_str.str.contains('nombre', na=False).any(): nom_col = col
-            if col_str.str.contains('importe|neto a pagar', na=False).any(): imp_col = col
+        # Iteramos sobre cada hoja del Excel actual
+        for nombre_hoja, df in diccionario_hojas.items():
+            pat_col, mat_col, nom_col, imp_col = None, None, None, None
             
-        if nom_col is not None and imp_col is not None:
-            # 2. Armar el nombre completo uniendo las columnas que existan
-            nombres = pd.Series("", index=df.index)
-            if pat_col is not None: nombres += df[pat_col].fillna("").astype(str) + " "
-            if mat_col is not None: nombres += df[mat_col].fillna("").astype(str) + " "
-            nombres += df[nom_col].fillna("").astype(str)
+            for col in df.columns:
+                col_str = df[col].astype(str).str.lower()
+                if col_str.str.contains('paterno', na=False).any(): pat_col = col
+                if col_str.str.contains('materno', na=False).any(): mat_col = col
+                if col_str.str.contains('nombre', na=False).any(): nom_col = col
+                if col_str.str.contains('importe|neto a pagar', na=False).any(): imp_col = col
+                
+            if nom_col is not None and imp_col is not None:
+                nombres = pd.Series("", index=df.index)
+                if pat_col is not None: nombres += df[pat_col].fillna("").astype(str) + " "
+                if mat_col is not None: nombres += df[mat_col].fillna("").astype(str) + " "
+                nombres += df[nom_col].fillna("").astype(str)
+                
+                temp_df = pd.DataFrame({'Nombre': nombres, 'Importe': df[imp_col]})
+                
+                # Limpieza
+                temp_df['Importe'] = pd.to_numeric(temp_df['Importe'], errors='coerce')
+                temp_df = temp_df.dropna(subset=['Importe'])
+                temp_df = temp_df[~temp_df['Nombre'].str.contains('nombre', case=False, na=False)]
+                temp_df = temp_df[temp_df['Nombre'].str.contains('[A-Za-z]', na=False)]
+                temp_df['Nombre'] = temp_df['Nombre'].str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
+                
+                datos_de_este_archivo.append(temp_df)
+        
+        # Si logramos extraer datos de alguna hoja de este archivo, los consolidamos
+        if datos_de_este_archivo:
+            # Juntamos todas las hojas de este archivo en una sola tabla temporal
+            df_archivo_completo = pd.concat(datos_de_este_archivo, ignore_index=True)
             
-            temp_df = pd.DataFrame({'Nombre': nombres, 'Importe': df[imp_col]})
+            # ELIMINAMOS DUPLICADOS EXACTOS dentro del mismo archivo para evitar sumar la hoja de "Resumen"
+            df_archivo_completo = df_archivo_completo.drop_duplicates(subset=['Nombre', 'Importe'])
             
-            # 3. La Magia: Limpiar la tabla de logos y totales
-            # Forzamos la columna Importe a números (los textos/logos se vuelven error/NaN)
-            temp_df['Importe'] = pd.to_numeric(temp_df['Importe'], errors='coerce')
-            
-            # Borramos las filas donde el importe quedó como NaN
-            temp_df = temp_df.dropna(subset=['Importe'])
-            
-            # Borramos las filas que son solo los títulos repitiéndose
-            temp_df = temp_df[~temp_df['Nombre'].str.contains('nombre', case=False, na=False)]
-            
-            # Borramos comisiones donde el nombre es un número (ej. el 0.045)
-            temp_df = temp_df[temp_df['Nombre'].str.contains('[A-Za-z]', na=False)]
-            
-            # Estandarizamos el texto final: Todo mayúsculas, quitamos dobles espacios
-            temp_df['Nombre'] = temp_df['Nombre'].str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
-            
-            lista_df.append(temp_df)
+            # Ahora sí, guardamos los datos limpios de este Excel en la lista general
+            lista_df.append(df_archivo_completo)
 
     if st.button("Generar Acumulado Total"):
         if lista_df:
-            # Consolidación final
+            # Unimos TODOS los archivos
             df_total = pd.concat(lista_df, ignore_index=True)
+            
+            # Suma final general: agrupamos por nombre y sumamos sus distintos pagos a lo largo de las semanas
             df_agrupado = df_total.groupby('Nombre', as_index=False)['Importe'].sum()
             
             st.success("¡Extracción y consolidación completadas!")
